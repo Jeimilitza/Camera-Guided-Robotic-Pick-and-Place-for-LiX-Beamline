@@ -1,0 +1,10 @@
+<?xml version="1.0" ?>
+<!-- SRDF for UR5e + Hand-E -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ur5e_with_hande">
+
+    <xacro:include filename="$(find arm_gripper_description)/urdf/common.srdf.xacro"/>
+
+    <xacro:include filename="$(find arm_gripper_description)/urdf/hande.srdf.xacro"/>
+
+</robot>
+
