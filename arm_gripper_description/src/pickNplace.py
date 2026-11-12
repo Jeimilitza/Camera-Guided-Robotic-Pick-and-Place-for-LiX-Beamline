@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 """
-Script to make initial Pick and place experiment on UR5e.
+Pick and place experiment on UR5e with AprilTag pose estimation.
+
+The tag detection is done by calling apriltag_runner's preprocess() and detect_tags()
+directly, so the pose is read as full-precision floats from the detection objects
+(no argv faking, no stdout capture, no regex).
 """
-# ros2 launch ur_robot_driver ur_control.launch.py   ur_type:=ur5e   robot_ip:=192.167.2.100   use_mock_hardware:=false   headless_mode:=true   launch_rviz:=false   kinematics_param_file:="/home/kpatel2/ur5e_aug25.yaml" 
+# ros2 launch ur_robot_driver ur_control.launch.py   ur_type:=ur5e   robot_ip:=192.167.2.100   use_mock_hardware:=false   headless_mode:=true   launch_rviz:=false   kinematics_param_file:="/home/kpatel2/ur5e_aug25.yaml"
 # ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur5e launch_rviz:=false
-# ros2 launch robotiq_hande_driver gripper_controller_preview.launch.py  set_tool_voltage:="24" use_fake_hardware:=false   create_socat_tty:=true   tty_port:=/tmp/ttyUR   socat_ip_address:=192.167.2.100   socat_port:=54321   frequency_hz:=10   launch_rviz:=false 
+# ros2 launch robotiq_hande_driver gripper_controller_preview.launch.py  set_tool_voltage:="24" use_fake_hardware:=false   create_socat_tty:=true   tty_port:=/tmp/ttyUR   socat_ip_address:=192.167.2.100   socat_port:=54321   frequency_hz:=10   launch_rviz:=false
 
 ##############################################################################################################################
-
-
 
 # /opt/ros/jazzy/lib/ur_client_library/tool_communication.py 192.167.2.100 --tcp-port 54321 --device-name /tmp/ttyUR
 # ros2 launch ur_robot_driver ur_control.launch.py   ur_type:=ur5e   robot_ip:=192.167.2.100   use_mock_hardware:=false   headless_mode:=true   launch_rviz:=false   description_launchfile:=/home/kpatel2/ws_moveit/src/arm_gripper_description/launch/ur_rsp.launch.py   controllers_file:=/home/kpatel2/ws_moveit/src/arm_gripper_description/controllers.yaml   use_tool_communication:=false
 # ros2 launch arm_gripper_moveit_config move_group.launch.py
 
-import os
 import sys
 import time
 import threading
+from pathlib import Path
 from threading import Thread
-from venv import logger
 
+import cv2
+import numpy as np
 
 import rclpy
 from rclpy.action import ActionClient
@@ -30,15 +33,11 @@ from rclpy.node import Node
 from pymoveit2 import MoveIt2
 
 from sensor_msgs.msg import JointState
-from moveit_msgs.srv import GetPositionFK
 from control_msgs.action import ParallelGripperCommand
 
-from pathlib import Path
 apriltag_reader_dir = Path("/home/kpatel2/ws_moveit/apriltag-reader-nsls-ii")
 sys.path.append(str(apriltag_reader_dir))
-import apriltag_runner
-import io
-import re
+from apriltag_runner import preprocess, detect_tags
 
 this_dir = Path("/home/kpatel2/ws_moveit/src/arm_gripper_description/src")
 sys.path.append(str(this_dir))
@@ -62,58 +61,13 @@ HOME = [
     1.5359529256820679,
 ]
 
-FRONT_PICKUP= [
+FRONT_PICKUP = [
     1.0642122030258179,
     -0.5147332710078736,
     -0.09414279460906982,
     -1.1568034452250977,
     4.806550979614258,
     -0.3926618734942835,
-]
-
-PICKUP= [
-    1.0987077951431274,
-    -0.5739746254733582,
-    0.8095129171954554,
-    -1.8395887813963832,
-    4.682865619659424,
-    2.641465902328491,
-]
-
-FRONT_PLACE= [
-    1.2886873483657837,
-    -0.5027454656413575,
-    0.4940288702594202,
-    -1.2308717531016846,
-    -0.7296341101275843,
-    2.700669527053833,
-]
-
-PLACE= [
-    1.4092493057250977,
-    -0.43961818635974126,
-    0.6141875425921839,
-    -1.5286696714213868,
-    -0.715675179158346,
-    2.872771739959717,
-]
-
-AWAY= [
-    1.3688501119613647,
-    -0.6605537694743653,
-    0.8922932783709925,
-    -1.8791781864561976,
-    2.658952474594116,
-    3.350132465362549,
-]
-
-AWAY2= [
-    1.3610490560531616,
-    -0.659830169086792,
-    0.8925731817828577,
-    -1.8923541508116664,
-    0.9240360260009766,
-    3.350092887878418,
 ]
 
 PLANNING_GROUP = "ur_manipulator"
@@ -124,10 +78,30 @@ GRIPPER_ACTION_NAME = "/gripper_action_controller/gripper_cmd"
 
 GRIPPER_JOINT_NAMES = ["hande_left_finger_joint"]
 GRIPPER_CLOSED_POSITION = 0.00485     # meters
-GRIPPER_OPEN_POSITION = 0.025     # meters -- fully open (per robotiq_hande_description: 0-25mm/finger)
-GRIPPER_MAX_EFFORT = 20.0         # placeholder effort limit; tune to your gripper config
-GRIPPER_ACTION_TIMEOUT = 10.0     # seconds to wait for the gripper action server
-GRIPPER_SETTLE_TIME = 0.1         # seconds to let the gripper finish moving before continuing
+GRIPPER_OPEN_POSITION = 0.025         # meters -- fully open (per robotiq_hande_description: 0-25mm/finger)
+GRIPPER_MAX_EFFORT = 20.0             # placeholder effort limit; tune to your gripper config
+GRIPPER_ACTION_TIMEOUT = 10.0         # seconds to wait for the gripper action server
+GRIPPER_SETTLE_TIME = 0.1             # seconds to let the gripper finish moving before continuing
+
+# ----------------------------
+# AprilTag detection settings
+# ----------------------------
+IMAGE_PATH = "/home/kpatel2/ws_moveit/apriltag-reader-nsls-ii/tag_images/capture.png"
+
+TAG_FAMILY = "tag36h11"        # same as the apriltag_runner CLI default (detect_tags itself defaults to tag25h9)
+TAG_SIZE_M = 0.005             # black-square edge length in meters
+FX = 11714.548810
+FY = 11706.389936
+CX = 639.771526
+CY = 515.834163
+
+TARGET_TAG_ID = None           # None = use the best detection; or set an int to require that ID
+N_FRAMES = 5                   # frames captured per measurement (median / mean over valid ones)
+MIN_VALID_FRAMES = 3           # fail the measurement if fewer frames give a good detection
+MIN_DECISION_MARGIN = 20.0     # reject weak detections
+MAX_HAMMING = 0                # reject detections decoded with bit errors
+MAX_TRANSLATION_STD_M = 0.0005 # warn if frame-to-frame translation scatter exceeds this (0.5 mm)
+FRAME_DELAY = 0.2              # seconds between captures
 
 
 def send_gripper_command(action_client, position, logger, max_effort=GRIPPER_MAX_EFFORT):
@@ -182,6 +156,113 @@ def open_gripper(action_client, logger):
     send_gripper_command(action_client, GRIPPER_OPEN_POSITION, logger)
 
 
+# ----------------------------
+# AprilTag pose measurement
+# ----------------------------
+
+
+def detect_tag_pose_once(image_path=IMAGE_PATH):
+    """Run the detector on a saved image and return the best tag detection as a dict.
+
+    Returns None if no tag passes the quality gates. The pose is the tag in the camera
+    frame, taken at full float precision from the detection object.
+    """
+    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None
+
+    gray = preprocess(img, use_clahe=False, use_sharpen=False, upscale=1.0)
+
+    detections = detect_tags(
+        gray,
+        families=TAG_FAMILY,
+        nthreads=4,
+        decimate=1.0,
+        sigma=0.0,
+        refine_edges=False,
+        decode_sharpening=0.25,
+        do_pose=True,
+        tag_size=TAG_SIZE_M,
+        fx=FX,
+        fy=FY,
+        cx=CX,
+        cy=CY,
+    )
+
+    good = [
+        d for d in detections
+        if d.decision_margin >= MIN_DECISION_MARGIN
+        and d.hamming <= MAX_HAMMING
+        and (TARGET_TAG_ID is None or d.tag_id == TARGET_TAG_ID)
+    ]
+    if not good:
+        return None
+
+    best = max(good, key=lambda d: d.decision_margin)
+    return {
+        "tag_id": int(best.tag_id),
+        "t": np.asarray(best.pose_t, dtype=float).reshape(3),
+        "R": np.asarray(best.pose_R, dtype=float).reshape(3, 3),
+        "margin": float(best.decision_margin),
+    }
+
+
+def nearest_rotation(R_mean):
+    """Project an averaged 3x3 matrix back onto a proper rotation matrix (SVD)."""
+    U, _, Vt = np.linalg.svd(R_mean)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        U[:, -1] *= -1
+        R = U @ Vt
+    return R
+
+
+def measure_tag_pose(logger):
+    """Capture several frames and combine the valid detections into one pose.
+
+    Returns (T_cam_tag, info) where T_cam_tag is a 4x4 homogeneous transform of the tag
+    in the camera frame (meters), or (None, None) if the measurement failed.
+    """
+    samples = []
+    for i in range(N_FRAMES):
+        capture_once()
+        det = detect_tag_pose_once()
+        if det is None:
+            logger.warn(f"Frame {i + 1}/{N_FRAMES}: no valid tag detection")
+        else:
+            samples.append(det)
+        time.sleep(FRAME_DELAY)
+
+    if len(samples) < MIN_VALID_FRAMES:
+        logger.error(f"Only {len(samples)}/{N_FRAMES} valid detections (need {MIN_VALID_FRAMES})")
+        return None, None
+
+    ids = {s["tag_id"] for s in samples}
+    if len(ids) > 1:
+        logger.error(f"Inconsistent tag IDs across frames: {sorted(ids)}")
+        return None, None
+
+    ts = np.stack([s["t"] for s in samples])
+    t_med = np.median(ts, axis=0)
+    t_std = ts.std(axis=0)
+    R_avg = nearest_rotation(np.mean([s["R"] for s in samples], axis=0))
+
+    if np.any(t_std > MAX_TRANSLATION_STD_M):
+        logger.warn(f"Translation scatter is high (std = {t_std} m); check lighting / settling")
+
+    T_cam_tag = np.eye(4)
+    T_cam_tag[:3, :3] = R_avg
+    T_cam_tag[:3, 3] = t_med
+
+    info = {
+        "tag_id": samples[0]["tag_id"],
+        "n_valid": len(samples),
+        "t_std": t_std,
+        "mean_margin": float(np.mean([s["margin"] for s in samples])),
+    }
+    return T_cam_tag, info
+
+
 def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, pickup, front_place, place, away, away2, loop):
     logger = node.get_logger()
 
@@ -201,7 +282,7 @@ def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, 
     moveit2.wait_until_executed()
     logger.info("HOME execution done")
     # OPEN gripper at the START (home) position before departing
-    #open_gripper(gripper_client, logger)
+    # open_gripper(gripper_client, logger)
     time.sleep(GRIPPER_SETTLE_TIME)
 
     for i in range(loop):
@@ -212,41 +293,29 @@ def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, 
         moveit2.move_to_configuration(joint_positions=front_pickup, tolerance=GOAL_TOLERANCE)
         moveit2.wait_until_executed()
         logger.info("TARGET execution done")
-        time.sleep(2)
-        
-        capture_once()
-        sys.argv = [
-        "apriltag_runner.py",
-        "--image",
-        "/home/kpatel2/ws_moveit/apriltag-reader-nsls-ii/tag_images/capture.png",
-        "--save-debug", "--tag-size 0.005", "--fx 11714.548810", "--fy 11706.389936", "--cx 639.771526", "--cy 515.834163"
-]
+        time.sleep(2)  # let the arm settle before imaging
 
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            apriltag_runner.main()
-        
-        output = buf.getvalue()
-        
-        pattern = re.compile(r"ID\s+(\d+):\s*t=\[([^\}}+)\]\s*m,\s*rpy=\[([^\]]+)\]\s*deg")
-        
-        detections = {}
-        for line in output.splitlines():
-            m = pattern.search(line)
-            if m:
-                tag_id = int(m.group(1))
-                t = [float(x) for x in m.group(2).split(",")]
-                rpy = [float(x) for x in m.group(3).split(",")]
-                detections[tag_id] = {"t": t, "rpy": rpy}
-                
-        if not detections:
-            print("No tag detected")
-        else:
-            tag_id, data = next(iter(detections.items()))
-            t = data["t"]
-            rpy = data["rpy"]
-            print(t)
-        
+        # Measure the tag pose (camera frame)
+        T_cam_tag, info = measure_tag_pose(logger)
+        if T_cam_tag is None:
+            logger.error("Tag pose measurement failed; aborting this cycle")
+            continue
+
+        logger.info(
+            f"Tag {info['tag_id']}: {info['n_valid']}/{N_FRAMES} valid frames, "
+            f"mean margin {info['mean_margin']:.1f}"
+        )
+        logger.info(f"t_cam_tag [m] = {np.array2string(T_cam_tag[:3, 3], precision=6)}")
+        logger.info(f"t std [m]     = {np.array2string(info['t_std'], precision=6)}")
+        logger.info(f"R_cam_tag =\n{np.array2string(T_cam_tag[:3, :3], precision=6)}")
+
+        # NEXT STEP (needs hand-eye calibration, not done here):
+        #   T_base_tag = T_base_tool0 @ T_tool0_camera @ T_cam_tag
+        # T_base_tool0 : FK / TF of tool0 at FRONT_PICKUP
+        # T_tool0_camera : hand-eye calibration result
+        # then apply the fixed tag->object grasp offset and plan to that pose.
+
+        time.sleep(5)
 
 
 def main():
@@ -287,131 +356,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-"""
-
-In front of pick up:
-1.1022988557815552,
--0.5622729820064087,
-0.6404545942889612,
-4.641230745906494,
--1.5886171499835413,
--2.0360735098468226,
-
-
-On sample pickup:
-1.0995420217514038,
--0.5115587276271363,
-0.640876595173971,
-4.6412078577229,
--1.5887816588031214,
--2.0360263029681605,
-
-
-Away:
-1.1446586847305298,
--0.8566671770862122,
-0.6437552610980433,
-4.94017984250144,
--1.5735457579242151,
--2.111075226460592,
-
-
-In front of place:
-1.0616601705551147,
--0.5614001315883179,
-0.6434920469867151,
-4.625825567836426,
--1.564636532460348,
--2.109563652669088,
-
-
-place:
-1.07748281955719,
--0.5087118905833741,
-0.646430794392721,
-4.577051802272461,
--1.6292083899127405,
--2.109548870717184,
-
-
-HOME:
-1.328967809677124,
--0.9655317229083558,
-0.5395215193377894,
-4.770629408746519,
--1.6053670088397425,
--1.595947567616598,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-new pickup:
-
-
-- elbow_joint
-- shoulder_lift_joint
-- shoulder_pan_joint
-- wrist_1_joint
-- wrist_2_joint
-- wrist_3_joint
-position:
-- 0.34935218492616826
-- -0.6009045404246827
-- 1.8250353336334229
-- 3.711465998286865
-- -1.8315604368792933
-- -1.6652067343341272
-
-
-
-
-
-
-position 2
- elbow_joint
-- shoulder_lift_joint
-- shoulder_pan_joint
-- wrist_1_joint
-- wrist_2_joint
-- wrist_3_joint
-position:
-- 0.34524518648256475
-- -0.43508584917102056
-- 1.1289507150650024
-- 4.865842911392011
-- -1.6191695372210901
-- 4.352119445800781
-
-
-
-position 3
-
-- elbow_joint
-- shoulder_lift_joint
-- shoulder_pan_joint
-- wrist_1_joint
-- wrist_2_joint
-- wrist_3_joint
-position:
-- 0.34819299379457647
-- -0.3521687549403687
-- 1.1121271848678589
-- 4.908619972854414
-- -1.6637714544879358
-- 4.351080894470215
-
-"""
