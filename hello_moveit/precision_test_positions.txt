@@ -1,0 +1,101 @@
+////////   500um   ////////
+Position A
+
+- elbow_joint
+- shoulder_lift_joint
+- shoulder_pan_joint
+- wrist_1_joint
+- wrist_2_joint
+- wrist_3_joint
+position:
+- -0.2776084244251251
+- -0.47618718565020757
+- 1.116768479347229
+- 3.6823455530354003
+- -1.1168511549579065
+- -0.032383267079488576
+
+
+Position B
+
+- elbow_joint
+- shoulder_lift_joint
+- shoulder_pan_joint
+- wrist_1_joint
+- wrist_2_joint
+- wrist_3_joint
+position:
+- -0.27710822224617004
+- -0.481262282734253
+- 1.1147249937057495
+- 3.7051474291035156
+- -1.1093810240374964
+- -0.032366577778951466
+
+////////// 100um //////////////
+Position A
+
+- elbow_joint
+- shoulder_lift_joint
+- shoulder_pan_joint
+- wrist_1_joint
+- wrist_2_joint
+- wrist_3_joint
+position:
+- -0.2776084244251251
+- -0.47618718565020757
+- 1.116768479347229
+- 3.6823455530354003
+- -1.1168511549579065
+- -0.032383267079488576
+
+Position B
+
+- elbow_joint
+- shoulder_lift_joint
+- shoulder_pan_joint
+- wrist_1_joint
+- wrist_2_joint
+- wrist_3_joint
+position:
+- -0.2773592174053192
+- -0.47848864019427495
+- 1.1162059307098389
+- 3.6922032076069335
+- -1.1142995993243616
+- -0.03233939806093389
+
+
+////////// 50um //////////////
+Position A
+
+- elbow_joint
+- shoulder_lift_joint
+- shoulder_pan_joint
+- wrist_1_joint
+- wrist_2_joint
+- wrist_3_joint
+position:
+- -0.2776084244251251
+- -0.47618718565020757
+- 1.116768479347229
+- 3.6823455530354003
+- -1.1168511549579065
+- -0.032383267079488576
+
+Position B
+
+- elbow_joint
+- shoulder_lift_joint
+- shoulder_pan_joint
+- wrist_1_joint
+- wrist_2_joint
+- wrist_3_joint
+position:
+- -0.2774699926376343
+- -0.4763273757747193
+- 1.1166317462921143
+- 3.682381792659424
+- -1.1168225447284144
+- -0.03233176866640264
+
