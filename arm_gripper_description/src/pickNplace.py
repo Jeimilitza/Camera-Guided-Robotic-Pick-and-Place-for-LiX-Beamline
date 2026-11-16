@@ -34,6 +34,9 @@ from pymoveit2 import MoveIt2
 
 from sensor_msgs.msg import JointState
 from control_msgs.action import ParallelGripperCommand
+import tf2_ros
+from rclpy.duration import Duration
+from rclpy.time import Time
 
 apriltag_reader_dir = Path("/home/kpatel2/ws_moveit/apriltag-reader-nsls-ii")
 sys.path.append(str(apriltag_reader_dir))
@@ -70,8 +73,53 @@ FRONT_PICKUP = [
     -0.3926618734942835,
 ]
 
+PICKUP = [
+    1.0987077951431274,
+    -0.5739746254733582,
+    0.8095129171954554,
+    -1.8395887813963832,
+    4.682865619659424,
+    2.641465902328491,
+]
+
+FRONT_PLACE = [
+    1.2886873483657837,
+    -0.5027454656413575,
+    0.4940288702594202,
+    -1.2308717531016846,
+    -0.7296341101275843,
+    2.700669527053833,
+]
+
+PLACE = [
+    1.4092493057250977,
+    -0.43961818635974126,
+    0.6141875425921839,
+    -1.5286696714213868,
+    -0.715675179158346,
+    2.872771739959717,
+]
+
+AWAY = [
+    1.3688501119613647,
+    -0.6605537694743653,
+    0.8922932783709925,
+    -1.8791781864561976,
+    2.658952474594116,
+    3.350132465362549,
+]
+
+AWAY2 = [
+    1.3610490560531616,
+    -0.659830169086792,
+    0.8925731817828577,
+    -1.8923541508116664,
+    0.9240360260009766,
+    3.350092887878418,
+]
+
 PLANNING_GROUP = "ur_manipulator"
-NUM_CYCLES = 1
+NUM_CYCLES = 5
 GOAL_TOLERANCE = 0.000001
 
 GRIPPER_ACTION_NAME = "/gripper_action_controller/gripper_cmd"
@@ -102,6 +150,25 @@ MIN_DECISION_MARGIN = 20.0     # reject weak detections
 MAX_HAMMING = 0                # reject detections decoded with bit errors
 MAX_TRANSLATION_STD_M = 0.0005 # warn if frame-to-frame translation scatter exceeds this (0.5 mm)
 FRAME_DELAY = 0.2              # seconds between captures
+
+# ----------------------------
+# Move-to-tag settings
+# ----------------------------
+# 4x4 hand-eye result: pose of the camera frame expressed in tool0 (meters).
+# MUST be set from your calibration; the script refuses to move while this is None.
+T_TOOL0_CAMERA = np.array([[-0.987397312, 0.097665698, 0.124530955, 0.038741170], [0.129596768, 0.950612864, 0.282028119, 0.057784375], [0.090836255, -0.294612616, 0.951289746, 0.333647457], [0, 0, 0, 1]]) # e.g. np.array([[...], [...], [...], [0, 0, 0, 1]])
+
+# The gripper point that should land on the tag (e.g. fingertip center). Set ONE of:
+GRIPPER_TCP_FRAME = None       # name of a TF frame in your URDF (looked up as tool0 -> frame)
+GRIPPER_TCP_IN_TOOL0 = [0, 0, 0.04]    # or [x, y, z] in meters, expressed in the tool0 frame
+
+TAG_TO_TARGET_OFFSET_BASE = [0.0, 0.0, 0.0]  # grasp offset from the tag, in base_link axes (m)
+APPROACH_OFFSET_BASE = [0.0, 0.0, 0.03]      # hover this far from the target first, base_link axes (m); all zeros = skip
+MAX_MOVE_DISTANCE_M = 0.10     # refuse any move longer than this from the capture pose (guards against bad calibration)
+USE_CARTESIAN = True           # straight-line moves; set False to use normal joint-space planning
+MOVE_TOL_POS = 0.0005          # meters
+MOVE_TOL_ORI = 0.001           # radians
+REQUIRE_CONFIRMATION = True    # wait for Enter in the terminal before any move toward the tag
 
 
 def send_gripper_command(action_client, position, logger, max_effort=GRIPPER_MAX_EFFORT):
@@ -263,7 +330,107 @@ def measure_tag_pose(logger):
     return T_cam_tag, info
 
 
-def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, pickup, front_place, place, away, away2, loop):
+def quat_to_rot(x, y, z, w):
+    """Quaternion (x, y, z, w) to a 3x3 rotation matrix."""
+    n = x * x + y * y + z * z + w * w
+    s = 2.0 / n
+    return np.array([
+        [1 - s * (y * y + z * z), s * (x * y - z * w), s * (x * z + y * w)],
+        [s * (x * y + z * w), 1 - s * (x * x + z * z), s * (y * z - x * w)],
+        [s * (x * z - y * w), s * (y * z + x * w), 1 - s * (x * x + y * y)],
+    ])
+
+
+def lookup_T(tf_buffer, target_frame, source_frame, timeout_s=2.0):
+    """Return (4x4 transform, quaternion xyzw) of source_frame expressed in target_frame."""
+    tf = tf_buffer.lookup_transform(
+        target_frame, source_frame, Time(), timeout=Duration(seconds=timeout_s)
+    )
+    tr = tf.transform.translation
+    q = tf.transform.rotation
+    T = np.eye(4)
+    T[:3, :3] = quat_to_rot(q.x, q.y, q.z, q.w)
+    T[:3, 3] = [tr.x, tr.y, tr.z]
+    return T, [q.x, q.y, q.z, q.w]
+
+
+def move_gripper_to_tag(moveit2, tf_buffer, T_cam_tag, logger):
+    """Move the gripper point (not tool0) to the tag position, keeping the wrist orientation.
+
+    Only x, y, z change: the tool0 orientation at the capture pose is reused for every goal.
+    Returns True if the moves were sent, False if they were refused or aborted.
+    """
+    if T_TOOL0_CAMERA is None:
+        logger.error("T_TOOL0_CAMERA (hand-eye calibration) is not set; refusing to move")
+        return False
+
+    try:
+        T_base_tool0, quat_xyzw = lookup_T(tf_buffer, "base_link", "tool0")
+        if GRIPPER_TCP_FRAME is not None:
+            T_tool0_tcp, _ = lookup_T(tf_buffer, "tool0", GRIPPER_TCP_FRAME)
+            p_tcp = T_tool0_tcp[:3, 3]
+        elif GRIPPER_TCP_IN_TOOL0 is not None:
+            p_tcp = np.asarray(GRIPPER_TCP_IN_TOOL0, dtype=float)
+        else:
+            logger.error("Set GRIPPER_TCP_FRAME or GRIPPER_TCP_IN_TOOL0; refusing to move")
+            return False
+    except tf2_ros.TransformException as e:
+        logger.error(f"TF lookup failed: {e}")
+        return False
+
+    # Tag position in base_link: T_base_tag = T_base_tool0 @ T_tool0_camera @ T_cam_tag
+    T_base_tag = T_base_tool0 @ np.asarray(T_TOOL0_CAMERA, dtype=float) @ T_cam_tag
+    p_target = T_base_tag[:3, 3] + np.asarray(TAG_TO_TARGET_OFFSET_BASE, dtype=float)
+
+    # tool0 position that puts the gripper point at a given base_link point,
+    # with the tool0 orientation held fixed: p_tool0 = p_goal - R_base_tool0 @ p_tcp
+    R_base_tool0 = T_base_tool0[:3, :3]
+    p_tool0_now = T_base_tool0[:3, 3]
+
+    goals = []
+    approach = np.asarray(APPROACH_OFFSET_BASE, dtype=float)
+    if np.any(approach != 0.0):
+        goals.append(("approach", p_target + approach - R_base_tool0 @ p_tcp))
+    goals.append(("target", p_target - R_base_tool0 @ p_tcp))
+
+    logger.info(f"Tag in base_link [m]: {np.array2string(T_base_tag[:3, 3], precision=5)}")
+    logger.info(f"Gripper point offset in tool0 [m]: {np.array2string(p_tcp, precision=5)}")
+    for label, p in goals:
+        dist = float(np.linalg.norm(p - p_tool0_now))
+        logger.info(
+            f"{label}: tool0 -> {np.array2string(p, precision=5)} m "
+            f"({dist * 1000:.1f} mm from current tool0)"
+        )
+        if dist > MAX_MOVE_DISTANCE_M:
+            logger.error(
+                f"{label} is {dist:.3f} m away (limit {MAX_MOVE_DISTANCE_M} m); "
+                "check T_TOOL0_CAMERA and the TCP offset. Refusing to move"
+            )
+            return False
+
+    if REQUIRE_CONFIRMATION:
+        answer = input("Move toward the tag? [y/N]: ").strip().lower()
+        if answer != "y":
+            logger.info("Move cancelled by user")
+            return False
+
+    for label, p in goals:
+        logger.info(f"Moving to {label}...")
+        moveit2.move_to_pose(
+            position=[float(v) for v in p],
+            quat_xyzw=quat_xyzw,
+            target_link="tool0",
+            frame_id="base_link",
+            tolerance_position=MOVE_TOL_POS,
+            tolerance_orientation=MOVE_TOL_ORI,
+            cartesian=USE_CARTESIAN,
+        )
+        moveit2.wait_until_executed()
+        logger.info(f"{label} execution done")
+    return True
+
+
+def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, pickup, front_place, place, away, away2, loop, tf_buffer):
     logger = node.get_logger()
 
     latest_joints = {}
@@ -309,11 +476,8 @@ def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, 
         logger.info(f"t std [m]     = {np.array2string(info['t_std'], precision=6)}")
         logger.info(f"R_cam_tag =\n{np.array2string(T_cam_tag[:3, :3], precision=6)}")
 
-        # NEXT STEP (needs hand-eye calibration, not done here):
-        #   T_base_tag = T_base_tool0 @ T_tool0_camera @ T_cam_tag
-        # T_base_tool0 : FK / TF of tool0 at FRONT_PICKUP
-        # T_tool0_camera : hand-eye calibration result
-        # then apply the fixed tag->object grasp offset and plan to that pose.
+        # Move the gripper point to the tag position (x, y, z only; wrist orientation unchanged)
+        move_gripper_to_tag(moveit2, tf_buffer, T_cam_tag, logger)
 
         time.sleep(5)
 
@@ -343,12 +507,15 @@ def main():
         callback_group=callback_group,
     )
 
+    tf_buffer = tf2_ros.Buffer()
+    tf2_ros.TransformListener(tf_buffer, node)
+
     executor = MultiThreadedExecutor(2)
     executor.add_node(node)
     spinner = Thread(target=executor.spin, daemon=True)
     spinner.start()
 
-    joint_trajectory_planner(node, moveit2, gripper_client, HOME, FRONT_PICKUP, PICKUP, FRONT_PLACE, PLACE, AWAY, AWAY2, NUM_CYCLES)
+    joint_trajectory_planner(node, moveit2, gripper_client, HOME, FRONT_PICKUP, PICKUP, FRONT_PLACE, PLACE, AWAY, AWAY2, NUM_CYCLES, tf_buffer)
 
     rclpy.shutdown()
     spinner.join()
