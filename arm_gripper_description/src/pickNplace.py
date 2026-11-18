@@ -64,13 +64,22 @@ HOME = [
     1.5359529256820679,
 ]
 
+HOME2 = [
+    1.1409382820129395,
+    -1.154371903543808,
+    1.5909484068499964,
+    -3.3006793461241664,
+    -1.1069591681109827,
+    2.423982858657837,
+]
+
 FRONT_PICKUP = [
-    1.0642122030258179,
-    -0.5147332710078736,
-    -0.09414279460906982,
-    -1.1568034452250977,
-    4.806550979614258,
-    -0.3926618734942835,
+    1.0883969068527222,
+    -0.8867919606021424,
+    0.6093910376178187,
+    -1.3889123511365433,
+    -1.6293609778033655,
+    2.6778504848480225,
 ]
 
 PICKUP = [
@@ -83,12 +92,12 @@ PICKUP = [
 ]
 
 FRONT_PLACE = [
-    1.2886873483657837,
-    -0.5027454656413575,
-    0.4940288702594202,
-    -1.2308717531016846,
-    -0.7296341101275843,
-    2.700669527053833,
+    1.108699917793274,
+    -0.8345599931529541,
+    0.783492390309469,
+    -1.1829282206347962,
+    -0.7980769316302698,
+    2.5932281017303467,
 ]
 
 PLACE = [
@@ -144,8 +153,8 @@ CX = 639.771526
 CY = 515.834163
 
 TARGET_TAG_ID = None           # None = use the best detection; or set an int to require that ID
-N_FRAMES = 5                   # frames captured per measurement (median / mean over valid ones)
-MIN_VALID_FRAMES = 3           # fail the measurement if fewer frames give a good detection
+N_FRAMES = 1                   # frames captured per measurement (median / mean over valid ones)
+MIN_VALID_FRAMES = 1           # fail the measurement if fewer frames give a good detection
 MIN_DECISION_MARGIN = 20.0     # reject weak detections
 MAX_HAMMING = 0                # reject detections decoded with bit errors
 MAX_TRANSLATION_STD_M = 0.0005 # warn if frame-to-frame translation scatter exceeds this (0.5 mm)
@@ -156,15 +165,15 @@ FRAME_DELAY = 0.2              # seconds between captures
 # ----------------------------
 # 4x4 hand-eye result: pose of the camera frame expressed in tool0 (meters).
 # MUST be set from your calibration; the script refuses to move while this is None.
-T_TOOL0_CAMERA = np.array([[-0.987397312, 0.097665698, 0.124530955, 0.038741170], [0.129596768, 0.950612864, 0.282028119, 0.057784375], [0.090836255, -0.294612616, 0.951289746, 0.333647457], [0, 0, 0, 1]]) # e.g. np.array([[...], [...], [...], [0, 0, 0, 1]])
+T_TOOL0_CAMERA = np.array([[0.989920316, 0.128049373, 0.060507235, -0.007336026], [-0.136271600, 0.977551853, 0.160693574, 0.024411300], [-0.038572248, -0.167319251, 0.985147933, 0.162342708], [0, 0, 0, 1]])  # e.g. np.array([[...], [...], [...], [0, 0, 0, 1]])
 
 # The gripper point that should land on the tag (e.g. fingertip center). Set ONE of:
 GRIPPER_TCP_FRAME = None       # name of a TF frame in your URDF (looked up as tool0 -> frame)
-GRIPPER_TCP_IN_TOOL0 = [0, 0, 0.04]    # or [x, y, z] in meters, expressed in the tool0 frame
+GRIPPER_TCP_IN_TOOL0 = [0, 0, 0.160]    # or [x, y, z] in meters, expressed in the tool0 frame
 
-TAG_TO_TARGET_OFFSET_BASE = [0.0, 0.0, 0.0]  # grasp offset from the tag, in base_link axes (m)
-APPROACH_OFFSET_BASE = [0.0, 0.0, 0.03]      # hover this far from the target first, base_link axes (m); all zeros = skip
-MAX_MOVE_DISTANCE_M = 0.10     # refuse any move longer than this from the capture pose (guards against bad calibration)
+TAG_TO_TARGET_OFFSET_BASE = [0.017, -0.006, 0.012]  # grasp offset from the tag, in base_link axes (m)
+APPROACH_OFFSET_BASE = [0.0, 0.0, 0.06]      # hover this far from the target first, base_link axes (m); all zeros = skip
+MAX_MOVE_DISTANCE_M = 0.50     # refuse any move longer than this from the capture pose (guards against bad calibration)
 USE_CARTESIAN = True           # straight-line moves; set False to use normal joint-space planning
 MOVE_TOL_POS = 0.0005          # meters
 MOVE_TOL_ORI = 0.001           # radians
@@ -430,7 +439,7 @@ def move_gripper_to_tag(moveit2, tf_buffer, T_cam_tag, logger):
     return True
 
 
-def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, pickup, front_place, place, away, away2, loop, tf_buffer):
+def joint_trajectory_planner(node, moveit2, gripper_client, home, home2, front_pickup, pickup, front_place, place, away, away2, loop, tf_buffer):
     logger = node.get_logger()
 
     latest_joints = {}
@@ -445,7 +454,7 @@ def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, 
 
     # Ensure a known gripper and arm state before the very first cycle
     logger.info("Planning and executing move to HOME...")
-    moveit2.move_to_configuration(joint_positions=home, tolerance=GOAL_TOLERANCE)
+    moveit2.move_to_configuration(joint_positions=home2, tolerance=GOAL_TOLERANCE)
     moveit2.wait_until_executed()
     logger.info("HOME execution done")
     # OPEN gripper at the START (home) position before departing
@@ -453,11 +462,12 @@ def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, 
     time.sleep(GRIPPER_SETTLE_TIME)
 
     for i in range(loop):
+    
         logger.info(f"===== CYCLE {i + 1} OF {loop} =====")
 
         # MOVE TO in front of sample.
         logger.info("Planning and executing move to in front of sample...")
-        moveit2.move_to_configuration(joint_positions=front_pickup, tolerance=GOAL_TOLERANCE)
+        moveit2.move_to_configuration(joint_positions=front_place, tolerance=GOAL_TOLERANCE)
         moveit2.wait_until_executed()
         logger.info("TARGET execution done")
         time.sleep(2)  # let the arm settle before imaging
@@ -480,7 +490,7 @@ def joint_trajectory_planner(node, moveit2, gripper_client, home, front_pickup, 
         move_gripper_to_tag(moveit2, tf_buffer, T_cam_tag, logger)
 
         time.sleep(5)
-
+                
 
 def main():
     rclpy.init()
@@ -515,7 +525,7 @@ def main():
     spinner = Thread(target=executor.spin, daemon=True)
     spinner.start()
 
-    joint_trajectory_planner(node, moveit2, gripper_client, HOME, FRONT_PICKUP, PICKUP, FRONT_PLACE, PLACE, AWAY, AWAY2, NUM_CYCLES, tf_buffer)
+    joint_trajectory_planner(node, moveit2, gripper_client, HOME, HOME2, FRONT_PICKUP, PICKUP, FRONT_PLACE, PLACE, AWAY, AWAY2, NUM_CYCLES, tf_buffer)
 
     rclpy.shutdown()
     spinner.join()
