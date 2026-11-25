@@ -1,0 +1,5 @@
+vmbpy
+numpy
+opencv-python==4.13.0.92
+opencv-contrib-python>=4.9,<4.14
+pupil-apriltags
