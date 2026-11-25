@@ -7,18 +7,15 @@
   <maintainer email="jsainzlop@bnl.gov.com">Jeimilitza</maintainer>
   <license>Apache-2.0</license>
 
-  <!-- ROS 2 Core & Message Dependencies -->
+  <!-- ROS 2 Jazzy Core & Message Dependencies -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>control_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
 
-  <!-- MoveIt 2 Python Wrapper -->
+  <!-- MoveIt 2 Python Wrapper (built in workspace) -->
   <exec_depend>pymoveit2</exec_depend>
-
-  <!-- System Python Libraries -->
-  <exec_depend>python3-opencv</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
 
   <!-- Testing / Linting -->
   <test_depend>ament_lint_auto</test_depend>
