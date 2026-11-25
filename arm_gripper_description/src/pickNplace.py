@@ -280,8 +280,35 @@ def detect_tag_pose_once(image_path=IMAGE_PATH):
         "t": np.asarray(best.pose_t, dtype=float).reshape(3),
         "R": np.asarray(best.pose_R, dtype=float).reshape(3, 3),
         "margin": float(best.decision_margin),
+        "corners": np.asarray(best.corners, dtype=float).reshape(4, 2),
+        "center": np.asarray(best.center, dtype=float).reshape(2),
+        "image": img,
     }
 
+def show_detection(det, show_ms=3000, zoom_crop=True, crop_half=60):
+    """Show the detected tag outlined on the image for show_ms milliseconds."""
+    img = det["image"]
+    vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if img.ndim == 2 else img.copy()
+
+    pts = det["corners"].astype(np.int32).reshape(-1, 1, 2)
+    cv2.polylines(vis, [pts], True, (0, 255, 0), 1)
+    cx, cy = det["center"].astype(int)
+    cv2.circle(vis, (cx, cy), 2, (0, 0, 255), -1)
+    cv2.putText(vis, f"ID {det['tag_id']}  margin {det['margin']:.1f}",
+                (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    if zoom_crop:
+        # Zoomed view of the tag, since a 5 mm tag is tiny in the full frame
+        y0, y1 = max(cy - crop_half, 0), min(cy + crop_half, vis.shape[0])
+        x0, x1 = max(cx - crop_half, 0), min(cx + crop_half, vis.shape[1])
+        crop = cv2.resize(vis[y0:y1, x0:x1], None, fx=6, fy=6,
+                          interpolation=cv2.INTER_NEAREST)
+        cv2.imshow("Detected tag (zoom)", crop)
+
+    cv2.imshow("Detected tag", vis)
+    cv2.waitKey(show_ms)          # window stays up this long, then the script continues
+    cv2.destroyAllWindows()
+    cv2.waitKey(1)                # lets the windows actually close
 
 def nearest_rotation(R_mean):
     """Project an averaged 3x3 matrix back onto a proper rotation matrix (SVD)."""
@@ -307,6 +334,7 @@ def measure_tag_pose(logger):
             logger.warn(f"Frame {i + 1}/{N_FRAMES}: no valid tag detection")
         else:
             samples.append(det)
+            show_detection(det)
         time.sleep(FRAME_DELAY)
 
     if len(samples) < MIN_VALID_FRAMES:
